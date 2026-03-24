@@ -1,0 +1,123 @@
+// Google Apps Script - Backend for LiveStock
+
+function doPost(e) {
+    const data = JSON.parse(e.postData.contents);
+    const action = e.parameter.action;
+
+    switch(action) {
+        case 'addFarmer':
+            return addFarmer(data);
+        case 'addAnimalData':
+            return addAnimalData(data);
+        case 'addHealthRecord':
+            return addHealthRecord(data);
+        case 'generateReport':
+            return generateReport(data);
+        default:
+            return ContentService.createTextOutput(JSON.stringify({ error: 'Unknown action' }));
+    }
+}
+
+function addFarmer(farmer) {
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Farmers');
+    sheet.appendRow([
+        farmer.name,
+        farmer.location,
+        farmer.farmName,
+        farmer.livestockType,
+        farmer.productionType,
+        farmer.setupDate
+    ]);
+    return ContentService.createTextOutput(JSON.stringify({ success: true }));
+}
+
+function addAnimalData(data) {
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Animal Data');
+    sheet.appendRow([
+        data.date,
+        data.farmerId,
+        data.species,
+        data.number,
+        data.dead,
+        data.sick,
+        data.feedType,
+        data.feedAmount,
+        data.waterAccess,
+        data.notes,
+        data.entryDate
+    ]);
+    
+    // Calculate and update metrics
+    updateMetrics(data.farmerId, sheet);
+    
+    return ContentService.createTextOutput(JSON.stringify({ success: true }));
+}
+
+function addHealthRecord(record) {
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Health Records');
+    sheet.appendRow([
+        record.date,
+        record.farmerId,
+        record.species,
+        record.treatment,
+        record.product,
+        record.dose,
+        record.withdrawalPeriod,
+        record.notes,
+        record.recordDate
+    ]);
+    return ContentService.createTextOutput(JSON.stringify({ success: true }));
+}
+
+function updateMetrics(farmerId, dataSheet) {
+    const metricsSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Production Metrics');
+    
+    // Get all data for this farmer
+    const data = dataSheet.getDataRange().getValues();
+    const farmerData = data.filter(row => row[1] == farmerId);
+    
+    if (farmerData.length === 0) return;
+    
+    // Calculate mortality rate
+    const totalDeaths = farmerData.reduce((sum, row) => sum + (row[4] || 0), 0);
+    const totalAnimals = farmerData.reduce((sum, row) => sum + (row[3] || 0), 0);
+    const mortalityRate = totalAnimals > 0 ? ((totalDeaths / totalAnimals) * 100).toFixed(2) : 0;
+    
+    // Calculate feed efficiency
+    const totalFeed = farmerData.reduce((sum, row) => sum + (row[7] || 0), 0);
+    const feedEfficiency = (totalFeed / farmerData.length).toFixed(2);
+    
+    // Update or add metrics
+    metricsSheet.appendRow([
+        farmerId,
+        mortalityRate,
+        feedEfficiency,
+        new Date()
+    ]);
+}
+
+function generateReport(farmerId) {
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Animal Data');
+    const data = sheet.getDataRange().getValues();
+    const farmerData = data.filter(row => row[1] == farmerId);
+    
+    return ContentService.createTextOutput(JSON.stringify({
+        farmerId: farmerId,
+        entries: farmerData.length,
+        lastEntry: farmerData[farmerData.length - 1] || null
+    }));
+}
+
+function doGet(e) {
+    const action = e.parameter.action;
+    
+    if (action === 'getBenchmarks') {
+        const species = e.parameter.species;
+        const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Benchmarks');
+        const data = sheet.getDataRange().getValues();
+        const benchmark = data.find(row => row[0] === species);
+        return ContentService.createTextOutput(JSON.stringify(benchmark || { error: 'Not found' }));
+    }
+    
+    return ContentService.createTextOutput(JSON.stringify({ error: 'Invalid request' }));
+}

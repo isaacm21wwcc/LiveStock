@@ -1,0 +1,370 @@
+// LiveStock PWA - Complete Application
+
+class LiveStockApp {
+    constructor() {
+        this.currentFarmer = null;
+        this.db = null;
+        this.alerts = [];
+        this.init();
+    }
+
+    async init() {
+        // Initialize database
+        await liveStockDB.init();
+        this.db = liveStockDB;
+        
+        // Register service worker
+        this.registerServiceWorker();
+        
+        // Setup UI
+        this.setupUI();
+        
+        // Load farmer data
+        await this.loadFarmerData();
+    }
+
+    registerServiceWorker() {
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('src/js/sw.js')
+                .then(reg => console.log('SW registered'))
+                .catch(err => console.log('SW failed', err));
+        }
+    }
+
+    setupUI() {
+        this.setupTabs();
+        this.setupForms();
+        this.setupButtons();
+        this.updateOfflineIndicator();
+    }
+
+    setupTabs() {
+        const tabs = document.querySelectorAll('.nav-tabs button');
+        tabs.forEach(tab => {
+            tab.addEventListener('click', (e) => this.switchTab(e.target.dataset.tab));
+        });
+    }
+
+    switchTab(tabName) {
+        // Hide all tabs
+        document.querySelectorAll('.tab-content').forEach(tab => {
+            tab.classList.remove('active');
+        });
+        // Show selected tab
+        document.getElementById(tabName).classList.add('active');
+        
+        // Update button states
+        document.querySelectorAll('.nav-tabs button').forEach(btn => {
+            btn.classList.remove('active');
+        });
+        event.target.classList.add('active');
+    }
+
+    setupForms() {
+        // Farmer setup form
+        const farmerForm = document.getElementById('farmerSetupForm');
+        if (farmerForm) {
+            farmerForm.addEventListener('submit', (e) => this.handleFarmerSetup(e));
+        }
+
+        // Animal data form
+        const dataForm = document.getElementById('animalDataForm');
+        if (dataForm) {
+            dataForm.addEventListener('submit', (e) => this.handleAnimalDataEntry(e));
+        }
+
+        // Health form
+        const healthForm = document.getElementById('healthForm');
+        if (healthForm) {
+            healthForm.addEventListener('submit', (e) => this.handleHealthEntry(e));
+        }
+    }
+
+    async handleFarmerSetup(e) {
+        e.preventDefault();
+        
+        const farmer = {
+            name: document.getElementById('farmerName').value,
+            location: document.getElementById('location').value,
+            farmName: document.getElementById('farmName').value,
+            livestockType: document.getElementById('livestockType').value,
+            productionType: document.getElementById('productionType').value,
+            setupDate: new Date().toISOString()
+        };
+
+        try {
+            const farmerId = await this.db.addFarmer(farmer);
+            this.currentFarmer = { ...farmer, id: farmerId };
+            
+            // Show success message
+            this.showAlert('Farmer profile created successfully!', 'success');
+            
+            // Add to sync queue
+            await this.db.addToSyncQueue({
+                action: 'addFarmer',
+                data: farmer,
+                timestamp: new Date().toISOString()
+            });
+
+            // Switch to dashboard
+            this.switchTab('dashboard');
+            this.updateDashboard();
+        } catch (error) {
+            this.showAlert('Error creating profile: ' + error.message, 'error');
+        }
+    }
+
+    async handleAnimalDataEntry(e) {
+        e.preventDefault();
+
+        const data = {
+            farmerId: this.currentFarmer.id,
+            date: document.getElementById('entryDate').value,
+            species: this.currentFarmer.livestockType,
+            number: parseInt(document.getElementById('numberOfAnimals').value),
+            dead: parseInt(document.getElementById('mortalities').value) || 0,
+            sick: parseInt(document.getElementById('sickAnimals').value) || 0,
+            feedType: document.getElementById('feedType').value,
+            feedAmount: parseFloat(document.getElementById('feedAmount').value),
+            waterAccess: document.getElementById('waterAccess').value === 'yes',
+            notes: document.getElementById('notes').value,
+            entryDate: new Date().toISOString()
+        };
+
+        try {
+            await this.db.addAnimalData(data);
+            this.showAlert('Data entry recorded successfully!', 'success');
+
+            // Add to sync queue
+            await this.db.addToSyncQueue({
+                action: 'addAnimalData',
+                data: data,
+                timestamp: new Date().toISOString()
+            });
+
+            // Generate alerts
+            await this.generateAlerts();
+
+            // Update dashboard
+            await this.updateDashboard();
+
+            // Clear form
+            document.getElementById('animalDataForm').reset();
+        } catch (error) {
+            this.showAlert('Error saving data: ' + error.message, 'error');
+        }
+    }
+
+    async handleHealthEntry(e) {
+        e.preventDefault();
+
+        const record = {
+            farmerId: this.currentFarmer.id,
+            date: document.getElementById('healthDate').value,
+            species: this.currentFarmer.livestockType,
+            treatment: document.getElementById('treatmentType').value,
+            product: document.getElementById('product').value,
+            dose: document.getElementById('dose').value,
+            withdrawalPeriod: parseInt(document.getElementById('withdrawalPeriod').value) || 0,
+            notes: document.getElementById('healthNotes').value,
+            recordDate: new Date().toISOString()
+        };
+
+        try {
+            await this.db.addHealthRecord(record);
+            this.showAlert('Health record saved successfully!', 'success');
+
+            // Add to sync queue
+            await this.db.addToSyncQueue({
+                action: 'addHealthRecord',
+                data: record,
+                timestamp: new Date().toISOString()
+            });
+
+            // Clear form
+            document.getElementById('healthForm').reset();
+        } catch (error) {
+            this.showAlert('Error saving record: ' + error.message, 'error');
+        }
+    }
+
+    async generateAlerts() {
+        const data = await this.db.getAnimalDataByFarmer(this.currentFarmer.id);
+        const healthData = await this.db.getHealthRecordsByFarmer(this.currentFarmer.id);
+        
+        const alerts = LiveStockAnalytics.generateAlerts(data, healthData);
+        
+        for (const alert of alerts) {
+            await this.db.addAlert({
+                farmerId: this.currentFarmer.id,
+                ...alert,
+                createdAt: new Date().toISOString()
+            });
+        }
+        
+        return alerts;
+    }
+
+    async updateDashboard() {
+        if (!this.currentFarmer) return;
+
+        const data = await this.db.getAnimalDataByFarmer(this.currentFarmer.id);
+        const healthData = await this.db.getHealthRecordsByFarmer(this.currentFarmer.id);
+        const alerts = await this.db.getAlertsByFarmer(this.currentFarmer.id);
+
+        // Update metrics
+        const mortality = LiveStockAnalytics.calculateMortalityRate(data);
+        const feedEfficiency = LiveStockAnalytics.calculateFeedEfficiency(data);
+
+        document.getElementById('mortalityRate').textContent = mortality + '%';
+        document.getElementById('feedEfficiency').textContent = feedEfficiency + ' kg/day';
+        document.getElementById('averageAnimals').textContent = data.length > 0 
+            ? Math.round(data.reduce((sum, d) => sum + d.number, 0) / data.length) 
+            : 0;
+        document.getElementById('daysRecorded').textContent = data.length;
+
+        // Show recent entries
+        this.showRecentEntries(data.slice(-5).reverse());
+
+        // Show alerts
+        this.showAlerts(alerts);
+
+        // Show recommendations
+        const recs = LiveStockAnalytics.getRecommendations(
+            this.currentFarmer.livestockType,
+            this.currentFarmer.productionType
+        );
+        this.showRecommendations(recs);
+    }
+
+    showRecentEntries(entries) {
+        const listHTML = entries.map(entry => `
+            <div class="data-item">
+                <div class="date">${new Date(entry.date).toLocaleDateString()}</div>
+                <div class="details">
+                    Animals: ${entry.number} | Dead: ${entry.dead} | Sick: ${entry.sick} | Feed: ${entry.feedAmount}kg
+                </div>
+            </div>
+        `).join('');
+
+        const container = document.getElementById('recentEntries');
+        if (container) container.innerHTML = listHTML || '<p>No entries yet</p>';
+    }
+
+    async showAlerts(alerts) {
+        if (!alerts || alerts.length === 0) {
+            document.getElementById('alertsList').innerHTML = '<p class="alert alert-info">✅ No alerts - Your farm is doing well!</p>';
+            return;
+        }
+
+        const alertsHTML = alerts.slice(-5).reverse().map(alert => `
+            <div class="alert alert-${alert.type}">
+                <strong>${alert.title}</strong>
+                <p>${alert.message}</p>
+                <em>${alert.recommendation}</em>
+            </div>
+        `).join('');
+
+        document.getElementById('alertsList').innerHTML = alertsHTML;
+    }
+
+    showRecommendations(recs) {
+        if (!recs) return;
+
+        const recsHTML = `
+            <div class="card">
+                <h3>📋 Recommended Vaccinations</h3>
+                <p>${recs.vaccinations.join(', ')}</p>
+            </div>
+            <div class="card">
+                <h3>🥕 Feed Guideline</h3>
+                <p>${recs.feedGuideline}</p>
+            </div>
+            <div class="card">
+                <h3>💧 Water Needs</h3>
+                <p>${recs.waterNeeds}</p>
+            </div>
+            <div class="card">
+                <h3>🎯 Mortality Target</h3>
+                <p>${recs.mortarityTarget}</p>
+            </div>
+        `;
+
+        document.getElementById('recommendations').innerHTML = recsHTML;
+    }
+
+    async loadFarmerData() {
+        const farmers = await this.db.getAllFarmers();
+        if (farmers.length > 0) {
+            this.currentFarmer = farmers[0];
+            this.updateDashboard();
+        } else {
+            this.showSetupWizard();
+        }
+    }
+
+    showSetupWizard() {
+        document.getElementById('dashboard').style.display = 'none';
+        document.getElementById('setupWizard').style.display = 'block';
+    }
+
+    showAlert(message, type) {
+        const alertDiv = document.createElement('div');
+        alertDiv.className = `alert alert-${type}`;
+        alertDiv.textContent = message;
+        document.body.insertBefore(alertDiv, document.body.firstChild);
+
+        setTimeout(() => alertDiv.remove(), 3000);
+    }
+
+    setupButtons() {
+        document.getElementById('syncButton').addEventListener('click', () => this.syncData());
+    }
+
+    async syncData() {
+        const queue = await this.db.getSyncQueue();
+        
+        if (queue.length === 0) {
+            this.showAlert('No data to sync', 'info');
+            return;
+        }
+
+        try {
+            // Sync to Google Sheets via API
+            for (const item of queue) {
+                await fetch(APPS_SCRIPT_URL, {
+                    method: 'POST',
+                    body: JSON.stringify(item.data)
+                });
+                await this.db.deleteSyncItem(item.id);
+            }
+            this.showAlert('Data synced successfully!', 'success');
+        } catch (error) {
+            this.showAlert('Sync failed (will retry when online): ' + error.message, 'warning');
+        }
+    }
+
+    updateOfflineIndicator() {
+        const indicator = document.getElementById('offlineIndicator');
+        if (!indicator) return;
+
+        const updateStatus = () => {
+            if (navigator.onLine) {
+                indicator.textContent = '✓ Online';
+                indicator.classList.add('online');
+            } else {
+                indicator.textContent = '✗ Offline';
+                indicator.classList.remove('online');
+            }
+        };
+
+        window.addEventListener('online', updateStatus);
+        window.addEventListener('offline', updateStatus);
+        updateStatus();
+    }
+}
+
+// Initialize app when DOM is ready
+document.addEventListener('DOMContentLoaded', () => {
+    window.app = new LiveStockApp();
+});
